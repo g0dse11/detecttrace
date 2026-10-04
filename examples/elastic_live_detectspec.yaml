@@ -6,6 +6,27 @@ inputs:
   profiles:
     live: {}
 
+test:
+  cases:
+    healthy:
+      event:
+        event:
+          code: 1
+        process:
+          name: powershell.exe
+          command_line: powershell.exe -enc AAA
+
+    broken:
+      event:
+        event:
+          code: 1
+        winlog:
+          event_data:
+            CommandLine: powershell.exe -enc AAA
+        process:
+          name: powershell.exe
+          args: powershell.exe -enc AAA
+
 checkpoints:
   normalization:
     require_event:

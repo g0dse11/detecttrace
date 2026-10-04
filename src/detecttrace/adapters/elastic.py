@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import base64
+import copy
+from datetime import datetime, timezone
 import json
 import os
 import ssl
+import time
 from typing import Any
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -186,6 +190,93 @@ class ElasticAdapter:
             payload = response.read().decode("utf-8")
             return json.loads(payload) if payload else {}
 
+    def ingest_correlated_test_event(
+        self,
+        spec: dict[str, Any],
+        index: str,
+        case: str = "healthy",
+    ) -> dict[str, Any]:
+        test_cfg = spec.get("test", {})
+        cases = test_cfg.get("cases", {})
+
+        if not isinstance(cases, dict) or case not in cases:
+            available = ", ".join(sorted(cases)) if isinstance(cases, dict) else ""
+            raise ValueError(
+                f"DetectSpec test case '{case}' not found."
+                + (f" Available: {available}" if available else "")
+            )
+
+        case_cfg = cases[case]
+        if not isinstance(case_cfg, dict) or not isinstance(case_cfg.get("event"), dict):
+            raise ValueError(f"DetectSpec test case '{case}' must contain an event object.")
+
+        event = copy.deepcopy(case_cfg["event"])
+        run_id = "dt-" + uuid.uuid4().hex[:16]
+        sent_at = datetime.now(timezone.utc)
+
+        event["@timestamp"] = sent_at.isoformat().replace("+00:00", "Z")
+
+        event_obj = event.setdefault("event", {})
+        if not isinstance(event_obj, dict):
+            event_obj = {}
+            event["event"] = event_obj
+        event_obj["id"] = run_id
+
+        detecttrace_obj = event.setdefault("detecttrace", {})
+        if not isinstance(detecttrace_obj, dict):
+            detecttrace_obj = {}
+            event["detecttrace"] = detecttrace_obj
+        detecttrace_obj["run_id"] = run_id
+        detecttrace_obj["case"] = case
+        detecttrace_obj["sent_at"] = event["@timestamp"]
+
+        started = time.perf_counter()
+        response = self._request(
+            "POST",
+            f"/{quote(index)}/_doc?refresh=true",
+            event,
+        )
+        indexing_ms = (time.perf_counter() - started) * 1000.0
+
+        if response.get("result") not in {"created", "updated"}:
+            raise ValueError(
+                "Elasticsearch did not confirm test event ingestion: "
+                f"{response.get('result', 'unknown')}"
+            )
+
+        return {
+            "run_id": run_id,
+            "sent_at": sent_at,
+            "indexing_ms": indexing_ms,
+            "event": event,
+            "document_id": response.get("_id"),
+        }
+
+    def events_for_run_id(
+        self,
+        index: str,
+        run_id: str,
+        size: int = 10,
+    ) -> list[dict[str, Any]]:
+        hits = self.search(
+            index=index,
+            size=size,
+            query={
+                "bool": {
+                    "should": [
+                        {"match_phrase": {"detecttrace.run_id": run_id}},
+                        {"match_phrase": {"event.id": run_id}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            },
+        )
+        return [
+            hit.get("_source", {})
+            for hit in hits
+            if isinstance(hit.get("_source"), dict)
+        ]
+
     def find_alerts(
         self,
         rule_name: str,
@@ -193,7 +284,34 @@ class ElasticAdapter:
         username: str = "elastic",
         password: str | None = None,
         size: int = 5,
+        run_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        must: list[dict[str, Any]] = [
+            {
+                "match_phrase": {
+                    "kibana.alert.rule.name": rule_name
+                }
+            }
+        ]
+
+        if run_id:
+            must.append(
+                {
+                    "bool": {
+                        "should": [
+                            {"match_phrase": {"detecttrace.run_id": run_id}},
+                            {"match_phrase": {"event.id": run_id}},
+                            {
+                                "match_phrase": {
+                                    "kibana.alert.original_event.id": run_id
+                                }
+                            },
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                }
+            )
+
         response = self._kibana_request(
             "POST",
             kibana_url,
@@ -201,8 +319,8 @@ class ElasticAdapter:
             body={
                 "size": size,
                 "query": {
-                    "match_phrase": {
-                        "kibana.alert.rule.name": rule_name
+                    "bool": {
+                        "must": must
                     }
                 },
                 "sort": [
@@ -224,6 +342,7 @@ class ElasticAdapter:
         kibana_url: str = "http://localhost:5602",
         username: str = "elastic",
         password: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         try:
             hits = self.find_alerts(
@@ -231,6 +350,7 @@ class ElasticAdapter:
                 kibana_url=kibana_url,
                 username=username,
                 password=password,
+                run_id=run_id,
             )
         except ValueError as exc:
             return {"healthy": False, "status": "FAIL", "summary": str(exc), "alert": None}
@@ -253,7 +373,10 @@ class ElasticAdapter:
             return {
                 "healthy": False,
                 "status": "FAIL",
-                "summary": f"No alert found for rule '{rule_name}'.",
+                "summary": (
+                    f"No alert found for rule '{rule_name}'"
+                    + (f" and run_id '{run_id}'." if run_id else ".")
+                ),
                 "alert": None,
             }
 
@@ -264,7 +387,10 @@ class ElasticAdapter:
         return {
             "healthy": True,
             "status": "PASS",
-            "summary": f"Found {len(hits)} alert(s) for rule '{rule_name}'.",
+            "summary": (
+                f"Found {len(hits)} alert(s) for rule '{rule_name}'"
+                + (f" with matching run_id '{run_id}'." if run_id else ".")
+            ),
             "alert": {
                 "id": hits[0].get("_id"),
                 "timestamp": source.get("@timestamp", "unknown"),
@@ -276,7 +402,192 @@ class ElasticAdapter:
                 ),
                 "severity": source.get("kibana.alert.severity", "unknown"),
                 "risk_score": source.get("kibana.alert.risk_score"),
+                "run_id": (
+                    get_path(source, "detecttrace.run_id")
+                    if get_path(source, "detecttrace.run_id") is not MISSING
+                    else (
+                        get_path(source, "event.id")
+                        if get_path(source, "event.id") is not MISSING
+                        else None
+                    )
+                ),
             },
+        }
+
+    def correlated_test(
+        self,
+        spec: dict[str, Any],
+        index: str,
+        rule_name: str,
+        kibana_url: str,
+        case: str = "healthy",
+        kibana_username: str = "elastic",
+        kibana_password: str | None = None,
+        limit: int = 10,
+        alert_timeout: float = 90.0,
+        poll_interval: float = 5.0,
+    ) -> dict[str, Any]:
+        try:
+            injected = self.ingest_correlated_test_event(
+                spec=spec,
+                index=index,
+                case=case,
+            )
+        except (ValueError, HTTPError, URLError, TimeoutError, OSError) as exc:
+            return {
+                "healthy": False,
+                "run_id": None,
+                "case": case,
+                "indexing_ms": None,
+                "alert_latency_s": None,
+                "stages": [
+                    {
+                        "name": "Test event",
+                        "status": "FAIL",
+                        "summary": f"Could not inject correlated test event: {exc}",
+                    }
+                ],
+                "root_cause": "The correlated test event could not be ingested.",
+                "confidence": "HIGH",
+                "alert": None,
+            }
+
+        run_id = injected["run_id"]
+        stages: list[dict[str, str]] = [
+            {
+                "name": "Test event",
+                "status": "PASS",
+                "summary": (
+                    f"Injected case '{case}' with run_id '{run_id}' "
+                    f"in {injected['indexing_ms']:.1f} ms."
+                ),
+            }
+        ]
+
+        trace = self.trace_spec(
+            spec=spec,
+            index=index,
+            limit=limit,
+            run_id=run_id,
+        )
+        stages.extend(trace.get("stages", []))
+
+        if not trace.get("healthy", False):
+            stages.append(
+                {
+                    "name": "Elastic alert",
+                    "status": "BLOCKED",
+                    "summary": (
+                        "Blocked because the correlated telemetry failed an "
+                        "upstream DetectSpec checkpoint."
+                    ),
+                }
+            )
+            return {
+                "healthy": False,
+                "run_id": run_id,
+                "case": case,
+                "indexing_ms": injected["indexing_ms"],
+                "alert_latency_s": None,
+                "stages": stages,
+                "root_cause": trace.get(
+                    "root_cause",
+                    "Upstream detection validation failed.",
+                ),
+                "confidence": trace.get("confidence", "MEDIUM"),
+                "alert": None,
+            }
+
+        deadline = time.monotonic() + alert_timeout
+        alert_result: dict[str, Any] | None = None
+
+        while True:
+            alert_result = self.verify_alert(
+                rule_name=rule_name,
+                kibana_url=kibana_url,
+                username=kibana_username,
+                password=kibana_password,
+                run_id=run_id,
+            )
+
+            if alert_result.get("healthy"):
+                break
+
+            if time.monotonic() >= deadline:
+                break
+
+            time.sleep(max(0.2, poll_interval))
+
+        if not alert_result or not alert_result.get("healthy"):
+            stages.append(
+                {
+                    "name": "Elastic alert",
+                    "status": "FAIL",
+                    "summary": (
+                        f"No alert correlated to run_id '{run_id}' was "
+                        f"observed within {alert_timeout:.0f}s."
+                    ),
+                }
+            )
+            return {
+                "healthy": False,
+                "run_id": run_id,
+                "case": case,
+                "indexing_ms": injected["indexing_ms"],
+                "alert_latency_s": None,
+                "stages": stages,
+                "root_cause": (
+                    "Telemetry and DetectSpec rule checks passed, but Elastic "
+                    "Security did not produce an alert correlated to this "
+                    "specific test run within the allowed window."
+                ),
+                "confidence": "HIGH",
+                "alert": None,
+            }
+
+        alert = alert_result.get("alert")
+        latency = None
+        if alert and isinstance(alert.get("timestamp"), str):
+            try:
+                alert_time = datetime.fromisoformat(
+                    alert["timestamp"].replace("Z", "+00:00")
+                )
+                latency = max(
+                    0.0,
+                    (alert_time - injected["sent_at"]).total_seconds(),
+                )
+            except ValueError:
+                latency = None
+
+        stages.append(
+            {
+                "name": "Elastic alert",
+                "status": "PASS",
+                "summary": (
+                    f"Alert matched the same run_id '{run_id}'."
+                    + (
+                        f" Approximate alert latency: {latency:.2f}s."
+                        if latency is not None
+                        else ""
+                    )
+                ),
+            }
+        )
+
+        return {
+            "healthy": True,
+            "run_id": run_id,
+            "case": case,
+            "indexing_ms": injected["indexing_ms"],
+            "alert_latency_s": latency,
+            "stages": stages,
+            "root_cause": (
+                "Detection passed end-to-end with exact test-run correlation: "
+                "the injected telemetry, DetectSpec evaluation, and Elastic "
+                "Security alert all belong to the same run_id."
+            ),
+            "confidence": "HIGH",
+            "alert": alert,
         }
 
     def end_to_end_test(
@@ -420,6 +731,7 @@ class ElasticAdapter:
         spec: dict[str, Any],
         index: str = "detecttrace-events",
         limit: int = 10,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         stages: list[dict[str, str]] = []
 
@@ -455,7 +767,11 @@ class ElasticAdapter:
                 "healthy": False,
             }
 
-        events = self.latest_events(index=index, size=limit)
+        events = (
+            self.events_for_run_id(index=index, run_id=run_id, size=limit)
+            if run_id
+            else self.latest_events(index=index, size=limit)
+        )
         if not events:
             stages.append(
                 {
@@ -475,7 +791,10 @@ class ElasticAdapter:
             {
                 "name": "Telemetry located",
                 "status": "PASS",
-                "summary": f"Loaded {len(events)} recent document(s).",
+                "summary": (
+                    f"Loaded {len(events)} document(s)"
+                    + (f" matching run_id '{run_id}'." if run_id else ".")
+                ),
             }
         )
 

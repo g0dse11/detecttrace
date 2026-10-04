@@ -304,20 +304,26 @@ def cmd_elastic_test(args: argparse.Namespace) -> int:
         ca_cert=args.ca_cert,
     )
 
-    result = adapter.end_to_end_test(
+    result = adapter.correlated_test(
         spec=spec,
         index=args.index,
         rule_name=args.rule_name,
         kibana_url=args.kibana_url,
+        case=args.case,
         kibana_username=args.username,
         kibana_password=password,
         limit=args.limit,
+        alert_timeout=args.timeout,
+        poll_interval=args.poll_interval,
     )
 
     print()
-    print("DETECTTRACE — END-TO-END DETECTION TEST")
+    print("DETECTTRACE — CORRELATED END-TO-END TEST")
     print("=" * 72)
     print(f"{spec['id']} — {spec['title']}")
+    if result.get("run_id"):
+        print(f"Run ID: {result['run_id']}")
+    print(f"Case: {result.get('case', args.case)}")
     print()
 
     for stage in result["stages"]:
@@ -333,6 +339,11 @@ def cmd_elastic_test(args: argparse.Namespace) -> int:
     print(result["root_cause"])
     print(f"Confidence: {result['confidence']}")
 
+    if result.get("indexing_ms") is not None:
+        print(f"Indexing round-trip: {result['indexing_ms']:.1f} ms")
+    if result.get("alert_latency_s") is not None:
+        print(f"Approx. alert latency: {result['alert_latency_s']:.2f} s")
+
     alert = result.get("alert")
     if alert:
         print()
@@ -343,6 +354,7 @@ def cmd_elastic_test(args: argparse.Namespace) -> int:
 
     print()
     return 0 if result["healthy"] else 1
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -508,6 +520,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Number of recent telemetry documents to inspect (default: 10)",
+    )
+    elastic_test.add_argument(
+        "--case",
+        default="healthy",
+        help="DetectSpec test case to run (default: healthy)",
+    )
+    elastic_test.add_argument(
+        "--timeout",
+        type=float,
+        default=90.0,
+        help="Seconds to wait for a correlated Elastic alert (default: 90)",
+    )
+    elastic_test.add_argument(
+        "--poll-interval",
+        type=float,
+        default=5.0,
+        help="Alert polling interval in seconds (default: 5)",
     )
     elastic_test.add_argument(
         "--ca-cert",

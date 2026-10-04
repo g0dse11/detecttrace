@@ -1,0 +1,1 @@
+{"event": {"provider": "Microsoft-Windows-Sysmon", "code": 1}, "host": {"name": "WS-0042"}, "process": {"name": "powershell.exe", "command_line": "powershell.exe -enc SQBFAFgA", "parent": {"name": "WINWORD.EXE"}}}

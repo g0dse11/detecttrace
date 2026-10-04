@@ -1,0 +1,1 @@
+{"event": {"provider": "Microsoft-Windows-Sysmon", "code": 1}, "host": {"name": "WS-0042"}, "winlog": {"event_data": {"CommandLine": "powershell.exe -enc SQBFAFgA", "ParentImage": "C:\\Program Files\\Microsoft Office\\WINWORD.EXE"}}, "process": {"name": "powershell.exe"}}

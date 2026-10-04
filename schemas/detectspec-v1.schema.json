@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://detectspec.dev/schema/v1.json",
+  "title": "DetectSpec v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "spec_version",
+    "id",
+    "title",
+    "inputs",
+    "checkpoints"
+  ],
+  "properties": {
+    "spec_version": {
+      "const": "detectspec/v1"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "behavior": {
+      "type": "object"
+    },
+    "inputs": {
+      "type": "object",
+      "required": [
+        "profiles"
+      ],
+      "properties": {
+        "profiles": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "collector": {
+                "type": "string"
+              },
+              "normalized": {
+                "type": "string"
+              },
+              "alerts": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "checkpoints": {
+      "type": "object",
+      "properties": {
+        "execution": {
+          "type": "object"
+        },
+        "source": {
+          "type": "object"
+        },
+        "collector": {
+          "type": "object"
+        },
+        "normalization": {
+          "type": "object"
+        },
+        "rule": {
+          "type": "object"
+        },
+        "alert": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

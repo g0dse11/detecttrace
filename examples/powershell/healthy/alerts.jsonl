@@ -1,0 +1,1 @@
+{"alert": {"rule_id": "DET-PS-001", "name": "Suspicious Encoded PowerShell"}, "host": {"name": "WS-0042"}, "timestamp": "2026-10-04T14:32:11.100Z"}

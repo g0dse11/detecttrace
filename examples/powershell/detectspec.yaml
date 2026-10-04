@@ -1,0 +1,79 @@
+spec_version: detectspec/v1
+id: DET-PS-001
+title: Suspicious Encoded PowerShell
+
+behavior:
+  mitre:
+    technique: T1059.001
+    name: PowerShell
+
+inputs:
+  profiles:
+    broken:
+      execution: broken/execution.json
+      source: broken/source.jsonl
+      collector: broken/collector.jsonl
+      normalized: broken/normalized.jsonl
+      alerts: broken/alerts.jsonl
+    healthy:
+      execution: healthy/execution.json
+      source: healthy/source.jsonl
+      collector: healthy/collector.jsonl
+      normalized: healthy/normalized.jsonl
+      alerts: healthy/alerts.jsonl
+
+checkpoints:
+  execution:
+    require:
+      - field: executed
+        op: equals
+        value: true
+
+  source:
+    require_event:
+      all:
+        - field: event.provider
+          op: equals
+          value: Microsoft-Windows-Sysmon
+        - field: event.code
+          op: equals
+          value: 1
+
+  collector:
+    require_event:
+      all:
+        - field: event.code
+          op: equals
+          value: 1
+
+  normalization:
+    require_event:
+      all:
+        - field: process.name
+          op: endswith
+          value: powershell.exe
+    required_fields:
+      - field: process.command_line
+        from: winlog.event_data.CommandLine
+      - field: process.parent.name
+        from: winlog.event_data.ParentImage
+
+  rule:
+    match:
+      all:
+        - field: process.name
+          op: endswith
+          value: powershell.exe
+        - field: process.command_line
+          op: regex
+          value: "(?i)(?:\\s|^)-(?:enc|encodedcommand)\\b"
+
+  alert:
+    require_event:
+      all:
+        - field: alert.rule_id
+          op: equals
+          value: DET-PS-001
+    within_seconds: 60
+    execution_time_field: timestamp
+    alert_time_field: timestamp

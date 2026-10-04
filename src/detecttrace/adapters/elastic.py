@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import ssl
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -15,12 +16,27 @@ from ..util import MISSING, flatten_leaves, get_path
 class ElasticAdapter:
     """Elasticsearch adapter for DetectTrace."""
 
-    def __init__(self, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        verify_tls: bool = True,
+        ca_cert: str | None = None,
+    ) -> None:
         self.base_url = (
             base_url
             or os.getenv("DETECTTRACE_ELASTIC_URL")
             or "http://localhost:9200"
         ).rstrip("/")
+        self.username = (
+            username
+            or os.getenv("DETECTTRACE_ELASTIC_USERNAME")
+            or "elastic"
+        )
+        self.password = password or os.getenv("DETECTTRACE_ELASTIC_PASSWORD")
+        self.verify_tls = verify_tls
+        self.ca_cert = ca_cert or os.getenv("DETECTTRACE_ELASTIC_CA_CERT")
 
     def _request(
         self,
@@ -35,6 +51,12 @@ class ElasticAdapter:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
+        if self.password:
+            token = base64.b64encode(
+                f"{self.username}:{self.password}".encode("utf-8")
+            ).decode("ascii")
+            headers["Authorization"] = f"Basic {token}"
+
         request = Request(
             f"{self.base_url}{path}",
             data=data,
@@ -42,7 +64,14 @@ class ElasticAdapter:
             method=method,
         )
 
-        with urlopen(request, timeout=10) as response:
+        context = None
+        if self.base_url.startswith("https://"):
+            if self.ca_cert:
+                context = ssl.create_default_context(cafile=self.ca_cert)
+            elif not self.verify_tls:
+                context = ssl._create_unverified_context()
+
+        with urlopen(request, timeout=10, context=context) as response:
             payload = response.read().decode("utf-8")
             return json.loads(payload) if payload else {}
 
@@ -248,6 +277,81 @@ class ElasticAdapter:
                 "severity": source.get("kibana.alert.severity", "unknown"),
                 "risk_score": source.get("kibana.alert.risk_score"),
             },
+        }
+
+    def end_to_end_test(
+        self,
+        spec: dict[str, Any],
+        index: str,
+        rule_name: str,
+        kibana_url: str,
+        kibana_username: str = "elastic",
+        kibana_password: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        trace = self.trace_spec(
+            spec=spec,
+            index=index,
+            limit=limit,
+        )
+
+        stages = list(trace.get("stages", []))
+
+        if not trace.get("healthy", False):
+            stages.append(
+                {
+                    "name": "Elastic alert",
+                    "status": "BLOCKED",
+                    "summary": "Blocked by an upstream failed checkpoint.",
+                }
+            )
+            return {
+                "healthy": False,
+                "stages": stages,
+                "root_cause": trace.get(
+                    "root_cause",
+                    "Upstream detection validation failed.",
+                ),
+                "confidence": trace.get("confidence", "MEDIUM"),
+                "alert": None,
+            }
+
+        alert_result = self.verify_alert(
+            rule_name=rule_name,
+            kibana_url=kibana_url,
+            username=kibana_username,
+            password=kibana_password,
+        )
+
+        stages.append(
+            {
+                "name": "Elastic alert",
+                "status": "PASS" if alert_result["healthy"] else "FAIL",
+                "summary": alert_result["summary"],
+            }
+        )
+
+        if not alert_result["healthy"]:
+            return {
+                "healthy": False,
+                "stages": stages,
+                "root_cause": (
+                    "Telemetry and DetectSpec rule checks passed, but no "
+                    "corresponding Elastic Security alert was observed."
+                ),
+                "confidence": "HIGH",
+                "alert": None,
+            }
+
+        return {
+            "healthy": True,
+            "stages": stages,
+            "root_cause": (
+                "Detection passed end-to-end: live telemetry satisfied the "
+                "DetectSpec and Elastic Security generated the expected alert."
+            ),
+            "confidence": "HIGH",
+            "alert": alert_result.get("alert"),
         }
 
     def status(

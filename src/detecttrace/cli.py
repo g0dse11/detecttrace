@@ -278,6 +278,72 @@ def cmd_elastic_alert(args: argparse.Namespace) -> int:
     print()
     return 0 if result["healthy"] else 1
 
+
+def cmd_elastic_test(args: argparse.Namespace) -> int:
+    try:
+        from .adapters.elastic import ElasticAdapter
+    except ImportError as exc:
+        print("ERROR: Elastic adapter could not be loaded.", file=sys.stderr)
+        print(f"DETAIL: {exc}", file=sys.stderr)
+        return 2
+
+    import getpass
+
+    spec_path = Path(args.spec)
+    spec = load_spec(spec_path)
+
+    password = os.getenv("DETECTTRACE_ELASTIC_PASSWORD")
+    if not password:
+        password = getpass.getpass("Elastic password: ")
+
+    adapter = ElasticAdapter(
+        base_url=args.url,
+        username=args.username,
+        password=password,
+        verify_tls=not args.insecure,
+        ca_cert=args.ca_cert,
+    )
+
+    result = adapter.end_to_end_test(
+        spec=spec,
+        index=args.index,
+        rule_name=args.rule_name,
+        kibana_url=args.kibana_url,
+        kibana_username=args.username,
+        kibana_password=password,
+        limit=args.limit,
+    )
+
+    print()
+    print("DETECTTRACE — END-TO-END DETECTION TEST")
+    print("=" * 72)
+    print(f"{spec['id']} — {spec['title']}")
+    print()
+
+    for stage in result["stages"]:
+        print(
+            f"{stage['name']:<26} "
+            f"{stage['status']:<8} "
+            f"{stage['summary']}"
+        )
+
+    print()
+    print("RESULT")
+    print("-" * 72)
+    print(result["root_cause"])
+    print(f"Confidence: {result['confidence']}")
+
+    alert = result.get("alert")
+    if alert:
+        print()
+        print(f"Alert status: {alert.get('status', 'unknown')}")
+        print(f"Severity: {alert.get('severity', 'unknown')}")
+        if alert.get("risk_score") is not None:
+            print(f"Risk score: {alert['risk_score']}")
+
+    print()
+    return 0 if result["healthy"] else 1
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="detecttrace",
@@ -403,6 +469,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Elasticsearch base URL",
     )
     elastic_alert.set_defaults(func=cmd_elastic_alert)
+
+    elastic_test = elastic_sub.add_parser(
+        "test",
+        help="run an end-to-end DetectSpec test against secured Elastic",
+    )
+    elastic_test.add_argument(
+        "spec",
+        help="Path to a DetectSpec YAML file",
+    )
+    elastic_test.add_argument(
+        "--rule-name",
+        required=True,
+        help="Elastic Security detection rule name",
+    )
+    elastic_test.add_argument(
+        "--url",
+        default=os.getenv("DETECTTRACE_ELASTIC_URL", "https://localhost:9201"),
+        help="Elasticsearch URL (default: https://localhost:9201)",
+    )
+    elastic_test.add_argument(
+        "--kibana-url",
+        default=os.getenv("DETECTTRACE_KIBANA_URL", "http://localhost:5602"),
+        help="Kibana URL (default: http://localhost:5602)",
+    )
+    elastic_test.add_argument(
+        "--username",
+        default=os.getenv("DETECTTRACE_ELASTIC_USERNAME", "elastic"),
+        help="Elastic username (default: elastic)",
+    )
+    elastic_test.add_argument(
+        "--index",
+        default="detecttrace-events",
+        help="Telemetry index (default: detecttrace-events)",
+    )
+    elastic_test.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Number of recent telemetry documents to inspect (default: 10)",
+    )
+    elastic_test.add_argument(
+        "--ca-cert",
+        default=None,
+        help="Path to Elasticsearch HTTP CA certificate",
+    )
+    elastic_test.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS certificate verification (local lab only)",
+    )
+    elastic_test.set_defaults(func=cmd_elastic_test)
 
     return parser
 

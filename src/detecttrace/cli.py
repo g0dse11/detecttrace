@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
@@ -228,6 +229,55 @@ def cmd_elastic_trace(args: argparse.Namespace) -> int:
 
     return 0 if result["healthy"] else 1
 
+
+def cmd_elastic_alert(args: argparse.Namespace) -> int:
+    try:
+        from .adapters.elastic import ElasticAdapter
+    except ImportError as exc:
+        print("ERROR: Elastic adapter could not be loaded.", file=sys.stderr)
+        print(f"DETAIL: {exc}", file=sys.stderr)
+        return 2
+
+    import getpass
+
+    password = os.getenv("DETECTTRACE_ELASTIC_PASSWORD")
+    if not password:
+        password = getpass.getpass("Elastic password: ")
+
+    adapter = ElasticAdapter(base_url=args.url)
+    result = adapter.verify_alert(
+        rule_name=args.rule_name,
+        kibana_url=args.kibana_url,
+        username=args.username,
+        password=password,
+    )
+
+    print()
+    print("DETECTTRACE — ELASTIC ALERT VERIFICATION")
+    print("=" * 72)
+    print(f"Kibana alert query         {result['status']:<8} {result['summary']}")
+
+    alert = result.get("alert")
+    if alert:
+        print(f"Rule                       PASS     {alert['rule_name']}")
+        print(f"Alert timestamp            PASS     {alert['timestamp']}")
+        print(f"Alert status               PASS     {alert['status']}")
+        print(f"Severity                   PASS     {alert['severity']}")
+        if alert.get("risk_score") is not None:
+            print(f"Risk score                 PASS     {alert['risk_score']}")
+        print()
+        print("ALERT CONFIRMED")
+        print("-" * 72)
+        print("Elastic Security generated a real alert for the requested rule.")
+    else:
+        print()
+        print("ALERT NOT CONFIRMED")
+        print("-" * 72)
+        print(result["summary"])
+
+    print()
+    return 0 if result["healthy"] else 1
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="detecttrace",
@@ -327,6 +377,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of recent documents to evaluate (default: 10)",
     )
     elastic_trace.set_defaults(func=cmd_elastic_trace)
+
+    elastic_alert = elastic_sub.add_parser(
+        "alert",
+        help="verify that Elastic Security generated a real alert",
+    )
+    elastic_alert.add_argument(
+        "--rule-name",
+        required=True,
+        help="Elastic Security detection rule name",
+    )
+    elastic_alert.add_argument(
+        "--kibana-url",
+        default=os.getenv("DETECTTRACE_KIBANA_URL", "http://localhost:5602"),
+        help="Kibana URL",
+    )
+    elastic_alert.add_argument(
+        "--username",
+        default=os.getenv("DETECTTRACE_ELASTIC_USERNAME", "elastic"),
+        help="Elastic username",
+    )
+    elastic_alert.add_argument(
+        "--url",
+        default=None,
+        help="Elasticsearch base URL",
+    )
+    elastic_alert.set_defaults(func=cmd_elastic_alert)
 
     return parser
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 from typing import Any
@@ -117,6 +118,137 @@ class ElasticAdapter:
             for hit in hits
             if isinstance(hit.get("_source"), dict)
         ]
+
+    def _kibana_request(
+        self,
+        method: str,
+        kibana_url: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        username: str = "elastic",
+        password: str | None = None,
+    ) -> dict[str, Any]:
+        if password is None:
+            password = os.getenv("DETECTTRACE_ELASTIC_PASSWORD")
+        if not password:
+            raise ValueError(
+                "No Elastic password supplied. Set DETECTTRACE_ELASTIC_PASSWORD."
+            )
+
+        token = base64.b64encode(
+            f"{username}:{password}".encode("utf-8")
+        ).decode("ascii")
+
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "kbn-xsrf": "true",
+            "Authorization": f"Basic {token}",
+        }
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+
+        request = Request(
+            f"{kibana_url.rstrip('/')}{path}",
+            data=data,
+            headers=headers,
+            method=method,
+        )
+        with urlopen(request, timeout=10) as response:
+            payload = response.read().decode("utf-8")
+            return json.loads(payload) if payload else {}
+
+    def find_alerts(
+        self,
+        rule_name: str,
+        kibana_url: str = "http://localhost:5602",
+        username: str = "elastic",
+        password: str | None = None,
+        size: int = 5,
+    ) -> list[dict[str, Any]]:
+        response = self._kibana_request(
+            "POST",
+            kibana_url,
+            "/api/detection_engine/signals/search",
+            body={
+                "size": size,
+                "query": {
+                    "match_phrase": {
+                        "kibana.alert.rule.name": rule_name
+                    }
+                },
+                "sort": [
+                    {
+                        "@timestamp": {
+                            "order": "desc"
+                        }
+                    }
+                ],
+            },
+            username=username,
+            password=password,
+        )
+        return response.get("hits", {}).get("hits", [])
+
+    def verify_alert(
+        self,
+        rule_name: str,
+        kibana_url: str = "http://localhost:5602",
+        username: str = "elastic",
+        password: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            hits = self.find_alerts(
+                rule_name=rule_name,
+                kibana_url=kibana_url,
+                username=username,
+                password=password,
+            )
+        except ValueError as exc:
+            return {"healthy": False, "status": "FAIL", "summary": str(exc), "alert": None}
+        except HTTPError as exc:
+            return {
+                "healthy": False,
+                "status": "FAIL",
+                "summary": f"Kibana alert query failed: HTTP {exc.code}.",
+                "alert": None,
+            }
+        except (URLError, TimeoutError, OSError) as exc:
+            return {
+                "healthy": False,
+                "status": "FAIL",
+                "summary": f"Kibana alert query failed: {exc}",
+                "alert": None,
+            }
+
+        if not hits:
+            return {
+                "healthy": False,
+                "status": "FAIL",
+                "summary": f"No alert found for rule '{rule_name}'.",
+                "alert": None,
+            }
+
+        source = hits[0].get("_source", {})
+        if not isinstance(source, dict):
+            source = {}
+
+        return {
+            "healthy": True,
+            "status": "PASS",
+            "summary": f"Found {len(hits)} alert(s) for rule '{rule_name}'.",
+            "alert": {
+                "id": hits[0].get("_id"),
+                "timestamp": source.get("@timestamp", "unknown"),
+                "rule_name": source.get("kibana.alert.rule.name", rule_name),
+                "status": (
+                    source.get("kibana.alert.workflow_status")
+                    or source.get("kibana.alert.status")
+                    or "unknown"
+                ),
+                "severity": source.get("kibana.alert.severity", "unknown"),
+                "risk_score": source.get("kibana.alert.risk_score"),
+            },
+        }
 
     def status(
         self,

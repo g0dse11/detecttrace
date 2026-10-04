@@ -1,0 +1,28 @@
+spec_version: detectspec/v1
+id: DET-PS-LIVE-001
+title: Live Encoded PowerShell
+
+inputs:
+  profiles:
+    live: {}
+
+checkpoints:
+  normalization:
+    require_event:
+      all:
+        - field: process.name
+          op: endswith
+          value: powershell.exe
+    required_fields:
+      - field: process.command_line
+        from: winlog.event_data.CommandLine
+
+  rule:
+    match:
+      all:
+        - field: process.name
+          op: endswith
+          value: powershell.exe
+        - field: process.command_line
+          op: regex
+          value: "(?i)(?:\\s|^)-(?:enc|encodedcommand)\\b"

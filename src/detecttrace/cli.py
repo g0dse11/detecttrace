@@ -188,6 +188,46 @@ def cmd_elastic_status(args: argparse.Namespace) -> int:
     return 0 if healthy else 1
 
 
+
+def cmd_elastic_trace(args: argparse.Namespace) -> int:
+    try:
+        from .adapters.elastic import ElasticAdapter
+    except ImportError as exc:
+        print("ERROR: Elastic adapter could not be loaded.", file=sys.stderr)
+        print(f"DETAIL: {exc}", file=sys.stderr)
+        return 2
+
+    spec_path = Path(args.spec)
+    spec = load_spec(spec_path)
+    adapter = ElasticAdapter(base_url=args.url)
+    result = adapter.trace_spec(
+        spec=spec,
+        index=args.index,
+        limit=args.limit,
+    )
+
+    print()
+    print("DETECTTRACE — ELASTIC LIVE TRACE")
+    print("=" * 72)
+    print(f"{spec['id']} — {spec['title']}")
+    print()
+
+    for stage in result["stages"]:
+        print(
+            f"{stage['name']:<26} "
+            f"{stage['status']:<8} "
+            f"{stage['summary']}"
+        )
+
+    print()
+    print("ROOT CAUSE")
+    print("-" * 72)
+    print(result["root_cause"])
+    print(f"Confidence: {result['confidence']}")
+    print()
+
+    return 0 if result["healthy"] else 1
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="detecttrace",
@@ -258,6 +298,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Telemetry index to check (default: detecttrace-events)",
     )
     elastic_status.set_defaults(func=cmd_elastic_status)
+
+    elastic_trace = elastic_sub.add_parser(
+        "trace",
+        help="evaluate a DetectSpec against live Elasticsearch telemetry",
+    )
+    elastic_trace.add_argument(
+        "spec",
+        help="Path to a DetectSpec YAML file",
+    )
+    elastic_trace.add_argument(
+        "--url",
+        default=None,
+        help=(
+            "Elasticsearch base URL "
+            "(default: DETECTTRACE_ELASTIC_URL or http://localhost:9200)"
+        ),
+    )
+    elastic_trace.add_argument(
+        "--index",
+        default="detecttrace-events",
+        help="Telemetry index to evaluate (default: detecttrace-events)",
+    )
+    elastic_trace.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Number of recent documents to evaluate (default: 10)",
+    )
+    elastic_trace.set_defaults(func=cmd_elastic_trace)
 
     return parser
 

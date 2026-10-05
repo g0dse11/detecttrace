@@ -5,6 +5,11 @@ import os
 from pathlib import Path
 import sys
 
+from .diagnostics import (
+    enrich_result,
+    render_result_json,
+    render_result_junit,
+)
 from .engine import TraceEngine
 from .report import render_json, render_text
 from .spec import SpecError, load_spec
@@ -317,6 +322,22 @@ def cmd_elastic_test(args: argparse.Namespace) -> int:
         poll_interval=args.poll_interval,
     )
 
+    enrich_result(
+        result,
+        spec_id=spec["id"],
+        spec_title=spec["title"],
+        backend="elastic",
+        rule_name=args.rule_name,
+    )
+
+    if args.format == "json":
+        print(render_result_json(result))
+        return 0 if result["healthy"] else 1
+
+    if args.format == "junit":
+        print(render_result_junit(result))
+        return 0 if result["healthy"] else 1
+
     print()
     print("DETECTTRACE — CORRELATED END-TO-END TEST")
     print("=" * 72)
@@ -338,6 +359,18 @@ def cmd_elastic_test(args: argparse.Namespace) -> int:
     print("-" * 72)
     print(result["root_cause"])
     print(f"Confidence: {result['confidence']}")
+
+    if not result["healthy"]:
+        print(
+            "First failing stage: "
+            f"{result.get('first_failed_stage') or 'UNKNOWN'}"
+        )
+        print(
+            "Failure code: "
+            f"{result.get('failure_code') or 'UNKNOWN'}"
+        )
+        if result.get("remediation"):
+            print(f"Recommended remediation: {result['remediation']}")
 
     if result.get("indexing_ms") is not None:
         print(f"Indexing round-trip: {result['indexing_ms']:.1f} ms")
@@ -537,6 +570,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="Alert polling interval in seconds (default: 5)",
+    )
+    elastic_test.add_argument(
+        "--format",
+        choices=("text", "json", "junit"),
+        default="text",
+        help="Output format (default: text)",
     )
     elastic_test.add_argument(
         "--ca-cert",

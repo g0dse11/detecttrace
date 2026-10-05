@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from ..diagnostics import finalize_result
 from ..rules import evaluate
 from ..util import MISSING, flatten_leaves, get_path
 
@@ -596,23 +597,34 @@ class ElasticAdapter:
                 case=case,
             )
         except (ValueError, HTTPError, URLError, TimeoutError, OSError) as exc:
-            return {
-                "healthy": False,
-                "run_id": None,
-                "case": case,
-                "indexing_ms": None,
-                "alert_latency_s": None,
-                "stages": [
-                    {
-                        "name": "Test event",
-                        "status": "FAIL",
-                        "summary": f"Could not inject correlated test event: {exc}",
-                    }
-                ],
-                "root_cause": "The correlated test event could not be ingested.",
-                "confidence": "HIGH",
-                "alert": None,
-            }
+            return finalize_result(
+                {
+                    "healthy": False,
+                    "run_id": None,
+                    "case": case,
+                    "indexing_ms": None,
+                    "alert_latency_s": None,
+                    "stages": [
+                        {
+                            "name": "Test event",
+                            "status": "FAIL",
+                            "summary": (
+                                f"Could not inject correlated test event: {exc}"
+                            ),
+                        }
+                    ],
+                    "root_cause": (
+                        "The correlated test event could not be ingested."
+                    ),
+                    "confidence": "HIGH",
+                    "alert": None,
+                },
+                failure_code="INGESTION_FAILURE",
+                remediation=(
+                    "Restore Elasticsearch connectivity, authentication, "
+                    "and write access before rerunning the test."
+                ),
+            )
 
         run_id = injected["run_id"]
         stages: list[dict[str, str]] = [
@@ -662,20 +674,24 @@ class ElasticAdapter:
                     },
                 ]
             )
-            return {
-                "healthy": False,
-                "run_id": run_id,
-                "case": case,
-                "indexing_ms": injected["indexing_ms"],
-                "alert_latency_s": None,
-                "stages": stages,
-                "root_cause": trace.get(
-                    "root_cause",
-                    "Upstream detection validation failed.",
-                ),
-                "confidence": trace.get("confidence", "MEDIUM"),
-                "alert": None,
-            }
+            return finalize_result(
+                {
+                    "healthy": False,
+                    "run_id": run_id,
+                    "case": case,
+                    "indexing_ms": injected["indexing_ms"],
+                    "alert_latency_s": None,
+                    "stages": stages,
+                    "root_cause": trace.get(
+                        "root_cause",
+                        "Upstream detection validation failed.",
+                    ),
+                    "confidence": trace.get("confidence", "MEDIUM"),
+                    "alert": None,
+                },
+                failure_code=trace.get("failure_code", "UNKNOWN"),
+                remediation=trace.get("remediation"),
+            )
 
         try:
             lookup = self.find_detection_rule(
@@ -734,20 +750,27 @@ class ElasticAdapter:
                     },
                 ]
             )
-            return {
-                "healthy": False,
-                "run_id": run_id,
-                "case": case,
-                "indexing_ms": injected["indexing_ms"],
-                "alert_latency_s": None,
-                "stages": stages,
-                "root_cause": lookup.get(
-                    "summary",
-                    f"Elastic detection rule '{rule_name}' was not found.",
+            return finalize_result(
+                {
+                    "healthy": False,
+                    "run_id": run_id,
+                    "case": case,
+                    "indexing_ms": injected["indexing_ms"],
+                    "alert_latency_s": None,
+                    "stages": stages,
+                    "root_cause": lookup.get(
+                        "summary",
+                        f"Elastic detection rule '{rule_name}' was not found.",
+                    ),
+                    "confidence": "HIGH",
+                    "alert": None,
+                },
+                failure_code="RULE_NOT_FOUND",
+                remediation=(
+                    "Create the expected Elastic detection rule or correct "
+                    "the configured rule name."
                 ),
-                "confidence": "HIGH",
-                "alert": None,
-            }
+            )
 
         rule = lookup.get("rule") or {}
         stages.append(
@@ -786,25 +809,38 @@ class ElasticAdapter:
                     },
                 ]
             )
-            return {
-                "healthy": False,
-                "run_id": run_id,
-                "case": case,
-                "indexing_ms": injected["indexing_ms"],
-                "alert_latency_s": None,
-                "stages": stages,
-                "root_cause": (
-                    f"Elastic detection rule '{rule_name}' is disabled. "
-                    "Enable the rule before running the detection test."
+            return finalize_result(
+                {
+                    "healthy": False,
+                    "run_id": run_id,
+                    "case": case,
+                    "indexing_ms": injected["indexing_ms"],
+                    "alert_latency_s": None,
+                    "stages": stages,
+                    "root_cause": (
+                        f"Elastic detection rule '{rule_name}' is disabled. "
+                        "Enable the rule before running the detection test."
+                        if enabled is False
+                        else (
+                            f"DetectTrace could not prove that Elastic "
+                            f"detection rule '{rule_name}' is enabled."
+                        )
+                    ),
+                    "confidence": "HIGH" if enabled is False else "MEDIUM",
+                    "alert": None,
+                },
+                failure_code=(
+                    "RULE_DISABLED" if enabled is False else "UNKNOWN"
+                ),
+                remediation=(
+                    f"Enable Elastic detection rule '{rule_name}'."
                     if enabled is False
                     else (
-                        f"DetectTrace could not prove that Elastic detection "
-                        f"rule '{rule_name}' is enabled."
+                        "Inspect the Elastic rule object and permissions so "
+                        "DetectTrace can determine the enabled state."
                     )
                 ),
-                "confidence": "HIGH" if enabled is False else "MEDIUM",
-                "alert": None,
-            }
+            )
 
         stages.append(
             {
@@ -876,25 +912,35 @@ class ElasticAdapter:
                         },
                     ]
                 )
-                return {
-                    "healthy": False,
-                    "run_id": run_id,
-                    "case": case,
-                    "indexing_ms": injected["indexing_ms"],
-                    "alert_latency_s": None,
-                    "stages": stages,
-                    "root_cause": (
-                        "Elastic reports that the detection rule failed during "
-                        "execution. "
-                        + (
-                            f"Execution message: {execution['message']}"
-                            if execution.get("message")
-                            else "Review the rule execution details in Kibana."
-                        )
+                return finalize_result(
+                    {
+                        "healthy": False,
+                        "run_id": run_id,
+                        "case": case,
+                        "indexing_ms": injected["indexing_ms"],
+                        "alert_latency_s": None,
+                        "stages": stages,
+                        "root_cause": (
+                            "Elastic reports that the detection rule failed "
+                            "during execution. "
+                            + (
+                                f"Execution message: {execution['message']}"
+                                if execution.get("message")
+                                else (
+                                    "Review the rule execution details "
+                                    "in Kibana."
+                                )
+                            )
+                        ),
+                        "confidence": "HIGH",
+                        "alert": None,
+                    },
+                    failure_code="RULE_EXECUTION_ERROR",
+                    remediation=(
+                        "Fix the Elastic rule execution error shown in the "
+                        "rule execution details, then rerun DetectTrace."
                     ),
-                    "confidence": "HIGH",
-                    "alert": None,
-                }
+                )
 
             stages.append(
                 {
@@ -913,21 +959,29 @@ class ElasticAdapter:
                     ),
                 }
             )
-            return {
-                "healthy": False,
-                "run_id": run_id,
-                "case": case,
-                "indexing_ms": injected["indexing_ms"],
-                "alert_latency_s": None,
-                "stages": stages,
-                "root_cause": (
-                    "Telemetry and DetectSpec rule checks passed and the "
-                    "Elastic rule is enabled, but no alert correlated to this "
-                    "specific test run was observed within the allowed window."
+            return finalize_result(
+                {
+                    "healthy": False,
+                    "run_id": run_id,
+                    "case": case,
+                    "indexing_ms": injected["indexing_ms"],
+                    "alert_latency_s": None,
+                    "stages": stages,
+                    "root_cause": (
+                        "Telemetry and DetectSpec rule checks passed and the "
+                        "Elastic rule is enabled, but no alert correlated to "
+                        "this specific test run was observed within the "
+                        "allowed window."
+                    ),
+                    "confidence": "HIGH",
+                    "alert": None,
+                },
+                failure_code="ALERT_TIMEOUT",
+                remediation=(
+                    "Inspect the Elastic rule schedule, look-back window, "
+                    "suppression settings, and alert-generation path."
                 ),
-                "confidence": "HIGH",
-                "alert": None,
-            }
+            )
 
         alert = alert_result.get("alert")
         latency = None
@@ -965,22 +1019,24 @@ class ElasticAdapter:
             }
         )
 
-        return {
-            "healthy": True,
-            "run_id": run_id,
-            "case": case,
-            "indexing_ms": injected["indexing_ms"],
-            "alert_latency_s": latency,
-            "stages": stages,
-            "root_cause": (
-                "Detection passed end-to-end with exact test-run correlation: "
-                "the injected telemetry, DetectSpec evaluation, Elastic rule "
-                "state, and Elastic Security alert all belong to the expected "
-                "detection path."
-            ),
-            "confidence": "HIGH",
-            "alert": alert,
-        }
+        return finalize_result(
+            {
+                "healthy": True,
+                "run_id": run_id,
+                "case": case,
+                "indexing_ms": injected["indexing_ms"],
+                "alert_latency_s": latency,
+                "stages": stages,
+                "root_cause": (
+                    "Detection passed end-to-end with exact test-run "
+                    "correlation: the injected telemetry, DetectSpec "
+                    "evaluation, Elastic rule state, and Elastic Security "
+                    "alert all belong to the expected detection path."
+                ),
+                "confidence": "HIGH",
+                "alert": alert,
+            }
+        )
 
     def end_to_end_test(
         self,
@@ -1136,12 +1192,19 @@ class ElasticAdapter:
             }
         )
         if not connection[0]:
-            return {
-                "stages": stages,
-                "root_cause": "Elasticsearch is unavailable.",
-                "confidence": "HIGH",
-                "healthy": False,
-            }
+            return finalize_result(
+                {
+                    "stages": stages,
+                    "root_cause": "Elasticsearch is unavailable.",
+                    "confidence": "HIGH",
+                    "healthy": False,
+                },
+                failure_code="INGESTION_FAILURE",
+                remediation=(
+                    "Restore Elasticsearch connectivity and authentication "
+                    "before rerunning the detection test."
+                ),
+            )
 
         index_check = self.check_index(index)
         stages.append(
@@ -1152,12 +1215,19 @@ class ElasticAdapter:
             }
         )
         if not index_check[0]:
-            return {
-                "stages": stages,
-                "root_cause": "The configured telemetry index is unavailable.",
-                "confidence": "HIGH",
-                "healthy": False,
-            }
+            return finalize_result(
+                {
+                    "stages": stages,
+                    "root_cause": "The configured telemetry index is unavailable.",
+                    "confidence": "HIGH",
+                    "healthy": False,
+                },
+                failure_code="INGESTION_FAILURE",
+                remediation=(
+                    "Verify the telemetry index name and confirm that the "
+                    "ingestion pipeline creates the expected index."
+                ),
+            )
 
         events = (
             self.events_for_run_id(index=index, run_id=run_id, size=limit)
@@ -1172,12 +1242,19 @@ class ElasticAdapter:
                     "summary": "No telemetry documents were returned.",
                 }
             )
-            return {
-                "stages": stages,
-                "root_cause": "No telemetry was available for evaluation.",
-                "confidence": "HIGH",
-                "healthy": False,
-            }
+            return finalize_result(
+                {
+                    "stages": stages,
+                    "root_cause": "No telemetry was available for evaluation.",
+                    "confidence": "HIGH",
+                    "healthy": False,
+                },
+                failure_code="TELEMETRY_MISSING",
+                remediation=(
+                    "Verify that the test generated telemetry and that the "
+                    "event reached the configured Elasticsearch index."
+                ),
+            )
 
         stages.append(
             {
@@ -1213,15 +1290,23 @@ class ElasticAdapter:
                     "summary": "Blocked by failed checkpoint: normalization.",
                 }
             )
-            return {
-                "stages": stages,
-                "root_cause": (
-                    "Live telemetry was found, but none matched the "
-                    "normalization selector declared by the DetectSpec."
+            return finalize_result(
+                {
+                    "stages": stages,
+                    "root_cause": (
+                        "Live telemetry was found, but none matched the "
+                        "normalization selector declared by the DetectSpec."
+                    ),
+                    "confidence": "HIGH",
+                    "healthy": False,
+                },
+                failure_code="REQUIRED_FIELD_MISSING",
+                remediation=(
+                    "Compare the live event shape with the DetectSpec "
+                    "normalization selector and correct the field contract "
+                    "or upstream mapping."
                 ),
-                "confidence": "HIGH",
-                "healthy": False,
-            }
+            )
 
         required = self._required_field_specs(normalization)
 
@@ -1276,12 +1361,28 @@ class ElasticAdapter:
                 else "Normalization/schema contract failed because required fields are missing."
             )
 
-            return {
-                "stages": stages,
-                "root_cause": root,
-                "confidence": "HIGH" if diagnoses else "MEDIUM",
-                "healthy": False,
-            }
+            return finalize_result(
+                {
+                    "stages": stages,
+                    "root_cause": root,
+                    "confidence": "HIGH" if diagnoses else "MEDIUM",
+                    "healthy": False,
+                },
+                failure_code=(
+                    "SCHEMA_DRIFT"
+                    if diagnoses
+                    else "REQUIRED_FIELD_MISSING"
+                ),
+                remediation=(
+                    "Correct the normalization or field mapping before "
+                    "rule evaluation."
+                    if diagnoses
+                    else (
+                        "Restore the required field or update the DetectSpec "
+                        "only if the schema change is intentional."
+                    )
+                ),
+            )
 
         stages.append(
             {
@@ -1301,12 +1402,17 @@ class ElasticAdapter:
                     "summary": "No rule predicate declared in the DetectSpec.",
                 }
             )
-            return {
-                "stages": stages,
-                "root_cause": "Live telemetry contract passed; no rule predicate was declared.",
-                "confidence": "HIGH",
-                "healthy": True,
-            }
+            return finalize_result(
+                {
+                    "stages": stages,
+                    "root_cause": (
+                        "Live telemetry contract passed; no rule predicate "
+                        "was declared."
+                    ),
+                    "confidence": "HIGH",
+                    "healthy": True,
+                }
+            )
 
         matched = any(evaluate(event, rule) for event in candidates)
         if matched:
@@ -1317,15 +1423,17 @@ class ElasticAdapter:
                     "summary": "DetectSpec rule predicate matched live telemetry.",
                 }
             )
-            return {
-                "stages": stages,
-                "root_cause": (
-                    "Live Elasticsearch telemetry satisfies the normalization "
-                    "contract and rule predicate."
-                ),
-                "confidence": "HIGH",
-                "healthy": True,
-            }
+            return finalize_result(
+                {
+                    "stages": stages,
+                    "root_cause": (
+                        "Live Elasticsearch telemetry satisfies the "
+                        "normalization contract and rule predicate."
+                    ),
+                    "confidence": "HIGH",
+                    "healthy": True,
+                }
+            )
 
         stages.append(
             {
@@ -1334,12 +1442,19 @@ class ElasticAdapter:
                 "summary": "DetectSpec rule predicate did not match live telemetry.",
             }
         )
-        return {
-            "stages": stages,
-            "root_cause": (
-                "Required telemetry is present and normalized correctly, "
-                "but the rule predicate did not match."
+        return finalize_result(
+            {
+                "stages": stages,
+                "root_cause": (
+                    "Required telemetry is present and normalized correctly, "
+                    "but the rule predicate did not match."
+                ),
+                "confidence": "HIGH",
+                "healthy": False,
+            },
+            failure_code="RULE_LOGIC_MISMATCH",
+            remediation=(
+                "Review the DetectSpec rule predicate and the backend "
+                "detection logic against the observed telemetry."
             ),
-            "confidence": "HIGH",
-            "healthy": False,
-        }
+        )

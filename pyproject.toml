@@ -10,7 +10,11 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [{name = "DetectTrace Project"}]
-dependencies = ["PyYAML>=6.0"]
+dependencies = [
+    "PyYAML>=6.0",
+    "azure-identity>=1.26,<2",
+    "azure-monitor-query>=2.0,<3",
+]
 
 [project.scripts]
 detecttrace = "detecttrace.cli:main"

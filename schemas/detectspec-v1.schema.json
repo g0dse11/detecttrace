@@ -2,8 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://detectspec.dev/schema/v1.json",
   "title": "DetectSpec v1",
+  "description": "Declarative contract for a DetectTrace detection test.",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": [
     "spec_version",
     "id",
@@ -13,21 +14,67 @@
   ],
   "properties": {
     "spec_version": {
-      "const": "detectspec/v1"
+      "const": "detectspec/v1",
+      "description": "DetectSpec format version."
     },
     "id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "Stable identifier for the detection contract.",
+      "examples": [
+        "DET-PS-LIVE-001"
+      ]
     },
     "title": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "Human-readable detection title."
     },
     "behavior": {
-      "type": "object"
+      "type": "object",
+      "description": "Optional descriptive behavior metadata. DetectTrace does not execute arbitrary behavior code.",
+      "additionalProperties": true
+    },
+    "inputs": {
+      "$ref": "#/$defs/inputs"
+    },
+    "test": {
+      "$ref": "#/$defs/test"
+    },
+    "checkpoints": {
+      "$ref": "#/$defs/checkpoints"
+    }
+  },
+  "$defs": {
+    "pathString": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to evidence used by an offline profile."
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/pathString"
+        },
+        "source": {
+          "$ref": "#/$defs/pathString"
+        },
+        "collector": {
+          "$ref": "#/$defs/pathString"
+        },
+        "normalized": {
+          "$ref": "#/$defs/pathString"
+        },
+        "alerts": {
+          "$ref": "#/$defs/pathString"
+        }
+      }
     },
     "inputs": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
         "profiles"
       ],
@@ -35,49 +82,237 @@
         "profiles": {
           "type": "object",
           "minProperties": 1,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
           "additionalProperties": {
-            "type": "object",
-            "properties": {
-              "execution": {
-                "type": "string"
-              },
-              "source": {
-                "type": "string"
-              },
-              "collector": {
-                "type": "string"
-              },
-              "normalized": {
-                "type": "string"
-              },
-              "alerts": {
-                "type": "string"
+            "$ref": "#/$defs/profile"
+          }
+        }
+      }
+    },
+    "testCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event"
+      ],
+      "properties": {
+        "event": {
+          "type": "object",
+          "description": "Telemetry event injected for this correlated test case."
+        }
+      }
+    },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cases"
+      ],
+      "properties": {
+        "cases": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/testCase"
+          }
+        }
+      }
+    },
+    "predicate": {
+      "description": "DetectTrace predicate expression.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/predicate"
               }
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/predicate"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "not"
+          ],
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/predicate"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field",
+            "op"
+          ],
+          "properties": {
+            "field": {
+              "type": "string",
+              "minLength": 1
+            },
+            "op": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Predicate operator understood by DetectTrace."
+            },
+            "value": {
+              "description": "Optional comparison value. Operators such as existence checks may not require one."
+            }
+          }
+        }
+      ]
+    },
+    "requiredField": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field"
+          ],
+          "properties": {
+            "field": {
+              "type": "string",
+              "minLength": 1
+            },
+            "from": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "executionCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "require": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/predicate"
+          },
+          "description": "Predicates that must all match the execution evidence object."
+        }
+      }
+    },
+    "eventCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "require_event": {
+          "$ref": "#/$defs/predicate"
+        }
+      }
+    },
+    "normalizationCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "require_event": {
+          "$ref": "#/$defs/predicate"
+        },
+        "required_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/requiredField"
+          }
+        }
+      }
+    },
+    "ruleCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "match": {
+          "$ref": "#/$defs/predicate"
         }
       }
     },
     "checkpoints": {
       "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
       "properties": {
         "execution": {
-          "type": "object"
+          "$ref": "#/$defs/executionCheckpoint"
         },
         "source": {
-          "type": "object"
+          "$ref": "#/$defs/eventCheckpoint"
         },
         "collector": {
-          "type": "object"
+          "$ref": "#/$defs/eventCheckpoint"
         },
         "normalization": {
-          "type": "object"
+          "$ref": "#/$defs/normalizationCheckpoint"
         },
         "rule": {
-          "type": "object"
+          "$ref": "#/$defs/ruleCheckpoint"
         },
         "alert": {
-          "type": "object"
+          "$ref": "#/$defs/alertCheckpoint"
+        }
+      }
+    },
+    "alertCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "require_event": {
+          "$ref": "#/$defs/predicate"
+        },
+        "within_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Maximum allowed latency between execution and the matching alert."
+        },
+        "execution_time_field": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Field containing the execution timestamp."
+        },
+        "alert_time_field": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Field containing the alert timestamp."
         }
       }
     }

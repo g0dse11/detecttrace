@@ -73,7 +73,8 @@ try {
         '(^|/)\.venv/',
         '(^|/)build/',
         '(^|/)dist/',
-        '\.egg-info/'
+        '\.egg-info/',
+        '(^|/)TEST_RESULTS\.txt$'
     )
 
     $badTracked = @()

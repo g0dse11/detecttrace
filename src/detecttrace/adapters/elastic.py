@@ -73,6 +73,16 @@ class ElasticAdapter:
         if self.base_url.startswith("https://"):
             if self.ca_cert:
                 context = ssl.create_default_context(cafile=self.ca_cert)
+
+                # Python 3.13+ enables OpenSSL's strict RFC 5280 checks in
+                # create_default_context(). Some locally generated/private
+                # CA certificates (including certain Elasticsearch lab CAs)
+                # omit extensions required by strict mode. We disable only
+                # VERIFY_X509_STRICT while retaining certificate validation,
+                # hostname verification, and the configured CA trust anchor.
+                strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
+                if strict_flag:
+                    context.verify_flags &= ~strict_flag
             elif not self.verify_tls:
                 context = ssl._create_unverified_context()
 

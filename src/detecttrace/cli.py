@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 
+from .config import resolve_elastic_settings
 from .diagnostics import (
     enrich_result,
     render_result_json,
@@ -296,26 +297,51 @@ def cmd_elastic_test(args: argparse.Namespace) -> int:
 
     spec_path = Path(args.spec)
     spec = load_spec(spec_path)
+    settings = resolve_elastic_settings(args)
 
     password = os.getenv("DETECTTRACE_ELASTIC_PASSWORD")
     if not password:
         password = getpass.getpass("Elastic password: ")
 
     adapter = ElasticAdapter(
-        base_url=args.url,
-        username=args.username,
+        base_url=settings["url"],
+        username=settings["username"],
         password=password,
-        verify_tls=not args.insecure,
-        ca_cert=args.ca_cert,
+        verify_tls=not settings["insecure"],
+        ca_cert=settings["ca_cert"],
     )
+
+    connected, connection_summary = adapter.check_connection()
+    if not connected:
+        print(
+            f"ERROR: Elasticsearch preflight failed: "
+            f"{connection_summary}",
+            file=sys.stderr,
+        )
+
+        lowered = connection_summary.lower()
+        if (
+            "certificate_verify_failed" in lowered
+            or "certificate verify failed" in lowered
+            or "self-signed certificate" in lowered
+        ):
+            print(
+                "HINT: Configure elastic.ca_cert in .detecttrace.yaml "
+                "or pass --ca-cert with Elasticsearch's HTTP CA "
+                "certificate. Use --insecure only for temporary "
+                "troubleshooting.",
+                file=sys.stderr,
+            )
+
+        return 2
 
     result = adapter.correlated_test(
         spec=spec,
-        index=args.index,
+        index=settings["index"],
         rule_name=args.rule_name,
-        kibana_url=args.kibana_url,
+        kibana_url=settings["kibana_url"],
         case=args.case,
-        kibana_username=args.username,
+        kibana_username=settings["username"],
         kibana_password=password,
         limit=args.limit,
         alert_timeout=args.timeout,
@@ -345,6 +371,8 @@ def cmd_elastic_test(args: argparse.Namespace) -> int:
     if result.get("run_id"):
         print(f"Run ID: {result['run_id']}")
     print(f"Case: {result.get('case', args.case)}")
+    if settings.get("config_path"):
+        print(f"Config: {settings['config_path']}")
     print()
 
     for stage in result["stages"]:
@@ -529,24 +557,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="Elastic Security detection rule name",
     )
     elastic_test.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "DetectTrace YAML config path "
+            "(default: DETECTTRACE_CONFIG, .detecttrace.yaml, "
+            "or ~/.detecttrace/config.yaml)"
+        ),
+    )
+    elastic_test.add_argument(
         "--url",
-        default=os.getenv("DETECTTRACE_ELASTIC_URL", "https://localhost:9201"),
-        help="Elasticsearch URL (default: https://localhost:9201)",
+        default=None,
+        help=(
+            "Elasticsearch URL "
+            "(CLI > environment > config > secure default)"
+        ),
     )
     elastic_test.add_argument(
         "--kibana-url",
-        default=os.getenv("DETECTTRACE_KIBANA_URL", "http://localhost:5602"),
-        help="Kibana URL (default: http://localhost:5602)",
+        default=None,
+        help=(
+            "Kibana URL "
+            "(CLI > environment > config > default)"
+        ),
     )
     elastic_test.add_argument(
         "--username",
-        default=os.getenv("DETECTTRACE_ELASTIC_USERNAME", "elastic"),
-        help="Elastic username (default: elastic)",
+        default=None,
+        help=(
+            "Elastic username "
+            "(CLI > environment > config > default)"
+        ),
     )
     elastic_test.add_argument(
         "--index",
-        default="detecttrace-events",
-        help="Telemetry index (default: detecttrace-events)",
+        default=None,
+        help=(
+            "Telemetry index "
+            "(CLI > environment > config > default)"
+        ),
     )
     elastic_test.add_argument(
         "--limit",

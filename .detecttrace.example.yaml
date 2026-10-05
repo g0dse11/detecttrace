@@ -1,0 +1,8 @@
+﻿config_version: detecttrace/config-v1
+
+elastic:
+  url: https://localhost:9201
+  kibana_url: http://localhost:5602
+  username: elastic
+  index: detecttrace-events
+  ca_cert: certs/http_ca.crt

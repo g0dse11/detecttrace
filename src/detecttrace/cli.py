@@ -646,27 +646,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser(
-        "sentinel",
-        help="Microsoft Sentinel / Log Analytics operations",
-    )
-    sentinel_sub = p.add_subparsers(
-        dest="sentinel_command",
-        required=True,
-    )
-    status = sentinel_sub.add_parser(
-        "status",
-        help="check Sentinel connectivity",
-    )
-    status.add_argument(
-        "--workspace-id",
-        help=(
-            "Log Analytics workspace ID "
-            "(or set DETECTTRACE_SENTINEL_WORKSPACE_ID)"
-        ),
-    )
-    status.set_defaults(func=cmd_sentinel_status)
-
-    p = sub.add_parser(
         "elastic",
         help="Elasticsearch operations",
     )
@@ -674,80 +653,6 @@ def build_parser() -> argparse.ArgumentParser:
         dest="elastic_command",
         required=True,
     )
-    elastic_status = elastic_sub.add_parser(
-        "status",
-        help="check Elasticsearch connectivity and telemetry index",
-    )
-    elastic_status.add_argument(
-        "--url",
-        default=None,
-        help=(
-            "Elasticsearch base URL "
-            "(default: DETECTTRACE_ELASTIC_URL or http://localhost:9200)"
-        ),
-    )
-    elastic_status.add_argument(
-        "--index",
-        default="detecttrace-events",
-        help="Telemetry index to check (default: detecttrace-events)",
-    )
-    elastic_status.set_defaults(func=cmd_elastic_status)
-
-    elastic_trace = elastic_sub.add_parser(
-        "trace",
-        help="evaluate a DetectSpec against live Elasticsearch telemetry",
-    )
-    elastic_trace.add_argument(
-        "spec",
-        help="Path to a DetectSpec YAML file",
-    )
-    elastic_trace.add_argument(
-        "--url",
-        default=None,
-        help=(
-            "Elasticsearch base URL "
-            "(default: DETECTTRACE_ELASTIC_URL or http://localhost:9200)"
-        ),
-    )
-    elastic_trace.add_argument(
-        "--index",
-        default="detecttrace-events",
-        help="Telemetry index to evaluate (default: detecttrace-events)",
-    )
-    elastic_trace.add_argument(
-        "--limit",
-        type=int,
-        default=10,
-        help="Number of recent documents to evaluate (default: 10)",
-    )
-    elastic_trace.set_defaults(func=cmd_elastic_trace)
-
-    elastic_alert = elastic_sub.add_parser(
-        "alert",
-        help="verify that Elastic Security generated a real alert",
-    )
-    elastic_alert.add_argument(
-        "--rule-name",
-        required=True,
-        help="Elastic Security detection rule name",
-    )
-    elastic_alert.add_argument(
-        "--kibana-url",
-        default=os.getenv("DETECTTRACE_KIBANA_URL", "http://localhost:5602"),
-        help="Kibana URL",
-    )
-    elastic_alert.add_argument(
-        "--username",
-        default=os.getenv("DETECTTRACE_ELASTIC_USERNAME", "elastic"),
-        help="Elastic username",
-    )
-    elastic_alert.add_argument(
-        "--url",
-        default=None,
-        help="Elasticsearch base URL",
-    )
-    elastic_alert.set_defaults(func=cmd_elastic_alert)
-
     elastic_test = elastic_sub.add_parser(
         "test",
         help="run an end-to-end DetectSpec test against secured Elastic",

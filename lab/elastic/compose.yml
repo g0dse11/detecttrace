@@ -1,0 +1,148 @@
+services:
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    container_name: detecttrace-setup
+    user: "0"
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      KIBANA_PASSWORD: ${KIBANA_PASSWORD}
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+
+        if [ ! -f config/certs/http_ca.crt ]; then
+          echo "Creating DetectTrace lab certificate authority..."
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip
+          unzip -q config/certs/ca.zip -d config/certs
+          cp config/certs/ca/ca.crt config/certs/http_ca.crt
+
+          printf '%s\n' \
+            'instances:' \
+            '  - name: es01' \
+            '    dns:' \
+            '      - es01' \
+            '      - localhost' \
+            '    ip:' \
+            '      - 127.0.0.1' \
+            > config/certs/instances.yml
+
+          echo "Creating Elasticsearch node certificate..."
+          bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key
+          unzip -q config/certs/certs.zip -d config/certs
+        fi
+
+        chown -R root:root config/certs
+        find config/certs -type d -exec chmod 750 {} \;
+        find config/certs -type f -exec chmod 640 {} \;
+
+        echo "Waiting for Elasticsearch..."
+        until curl --cacert config/certs/http_ca.crt -s https://es01:9200 | grep -q "missing authentication credentials"; do
+          sleep 5
+        done
+
+        echo "Configuring kibana_system password..."
+        until curl --cacert config/certs/http_ca.crt -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" https://es01:9200/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do
+          sleep 5
+        done
+
+        echo "Ensuring detecttrace-events index exists..."
+        if ! curl --cacert config/certs/http_ca.crt -s -f -I -u "elastic:${ELASTIC_PASSWORD}" https://es01:9200/detecttrace-events >/dev/null; then
+          curl --cacert config/certs/http_ca.crt -s -f -X PUT -u "elastic:${ELASTIC_PASSWORD}" https://es01:9200/detecttrace-events >/dev/null
+        fi
+
+        echo "DetectTrace Elastic lab setup complete."
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -f config/certs/es01/es01.crt && test -f config/certs/http_ca.crt"
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    container_name: detecttrace-es
+    depends_on:
+      setup:
+        condition: service_healthy
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs:ro
+      - esdata:/usr/share/elasticsearch/data
+    ports:
+      - "127.0.0.1:9201:9200"
+    environment:
+      node.name: es01
+      cluster.name: detecttrace-cluster
+      discovery.type: single-node
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      bootstrap.memory_lock: "true"
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "true"
+      xpack.security.http.ssl.key: certs/es01/es01.key
+      xpack.security.http.ssl.certificate: certs/es01/es01.crt
+      xpack.security.http.ssl.certificate_authorities: certs/http_ca.crt
+      xpack.security.transport.ssl.enabled: "true"
+      xpack.security.transport.ssl.verification_mode: certificate
+      xpack.security.transport.ssl.key: certs/es01/es01.key
+      xpack.security.transport.ssl.certificate: certs/es01/es01.crt
+      xpack.security.transport.ssl.certificate_authorities: certs/http_ca.crt
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+    mem_limit: 2g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl --cacert config/certs/http_ca.crt -s https://localhost:9200 | grep -q 'missing authentication credentials'"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
+    container_name: detecttrace-kibana
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+      es01:
+        condition: service_healthy
+    volumes:
+      - certs:/usr/share/kibana/config/certs:ro
+    ports:
+      - "127.0.0.1:5602:5601"
+    environment:
+      SERVERNAME: detecttrace-kibana
+      ELASTICSEARCH_HOSTS: https://es01:9200
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: ${KIBANA_PASSWORD}
+      ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES: config/certs/http_ca.crt
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: ${KIBANA_ENCRYPTION_KEY}
+      XPACK_SECURITY_ENCRYPTIONKEY: ${KIBANA_SECURITY_KEY}
+      XPACK_REPORTING_ENCRYPTIONKEY: ${KIBANA_REPORTING_KEY}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:5601/api/status >/dev/null"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+    restart: unless-stopped
+
+volumes:
+  certs:
+    name: detecttrace-certs
+  esdata:
+    name: detecttrace-es-data

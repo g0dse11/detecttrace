@@ -417,6 +417,71 @@ def cmd_elastic_test(args: argparse.Namespace) -> int:
     return 0 if result["healthy"] else 1
 
 
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    import getpass
+
+    try:
+        settings = resolve_elastic_settings(args)
+    except ValueError as exc:
+        print()
+        print("DETECTTRACE — DOCTOR")
+        print("=" * 72)
+        print(
+            f"{'Configuration':<26} "
+            f"{'FAIL':<8} "
+            f"{exc}"
+        )
+        print()
+        print("RESULT")
+        print("-" * 72)
+        print("Environment is not ready for DetectTrace.")
+        print()
+        return 2
+
+    password = os.getenv("DETECTTRACE_ELASTIC_PASSWORD")
+    if not password:
+        password = getpass.getpass("Elastic password: ")
+
+    from .doctor import run_doctor
+
+    result = run_doctor(
+        settings=settings,
+        password=password,
+    )
+
+    print()
+    print("DETECTTRACE — DOCTOR")
+    print("=" * 72)
+
+    for check in result["checks"]:
+        print(
+            f"{check['name']:<26} "
+            f"{check['status']:<8} "
+            f"{check['summary']}"
+        )
+
+    print()
+    print("RESULT")
+    print("-" * 72)
+
+    if result["healthy"]:
+        print(
+            "Environment is ready for DetectTrace Elastic "
+            "detection testing."
+        )
+        exit_code = 0
+    else:
+        print(
+            "Environment is not ready for DetectTrace. "
+            "Resolve the failed environment checks before "
+            "running a detection test."
+        )
+        exit_code = 2
+
+    print()
+    return exit_code
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="detecttrace",
@@ -439,6 +504,46 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("directory")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser(
+        "doctor",
+        help="check whether the local Elastic environment is ready",
+    )
+    p.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "DetectTrace YAML config path "
+            "(default: DETECTTRACE_CONFIG, .detecttrace.yaml, "
+            "or ~/.detecttrace/config.yaml)"
+        ),
+    )
+    p.add_argument(
+        "--url",
+        default=None,
+        help="Elasticsearch URL (CLI > environment > config > default)",
+    )
+    p.add_argument(
+        "--kibana-url",
+        default=None,
+        help="Kibana URL (CLI > environment > config > default)",
+    )
+    p.add_argument(
+        "--username",
+        default=None,
+        help="Elastic username (CLI > environment > config > default)",
+    )
+    p.add_argument(
+        "--index",
+        default=None,
+        help="Telemetry index (CLI > environment > config > default)",
+    )
+    p.add_argument(
+        "--ca-cert",
+        default=None,
+        help="Path to Elasticsearch HTTP CA certificate",
+    )
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser(
         "sentinel",

@@ -10,7 +10,7 @@ import time
 from typing import Any
 import uuid
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from ..rules import evaluate
@@ -277,6 +277,168 @@ class ElasticAdapter:
             if isinstance(hit.get("_source"), dict)
         ]
 
+    def find_detection_rule(
+        self,
+        rule_name: str,
+        kibana_url: str = "http://localhost:5602",
+        username: str = "elastic",
+        password: str | None = None,
+    ) -> dict[str, Any]:
+        """Find one Elastic Security detection rule by exact display name."""
+
+        query = urlencode(
+            {
+                "page": 1,
+                "per_page": 100,
+            }
+        )
+
+        response = self._kibana_request(
+            "GET",
+            kibana_url,
+            f"/api/detection_engine/rules/_find?{query}",
+            username=username,
+            password=password,
+        )
+
+        rules = response.get("data", [])
+        if not isinstance(rules, list):
+            rules = []
+
+        exact = [
+            rule
+            for rule in rules
+            if isinstance(rule, dict) and rule.get("name") == rule_name
+        ]
+
+        if not exact:
+            return {
+                "found": False,
+                "ambiguous": False,
+                "rule": None,
+                "summary": f"Detection rule '{rule_name}' was not found.",
+            }
+
+        if len(exact) > 1:
+            return {
+                "found": False,
+                "ambiguous": True,
+                "rule": None,
+                "summary": (
+                    f"Found {len(exact)} detection rules named "
+                    f"'{rule_name}'. Rule name is ambiguous."
+                ),
+            }
+
+        candidate = exact[0]
+        rule_id = candidate.get("id")
+
+        if not rule_id:
+            return {
+                "found": True,
+                "ambiguous": False,
+                "rule": candidate,
+                "summary": f"Found detection rule '{rule_name}'.",
+            }
+
+        detail_query = urlencode({"id": rule_id})
+        try:
+            detailed = self._kibana_request(
+                "GET",
+                kibana_url,
+                f"/api/detection_engine/rules?{detail_query}",
+                username=username,
+                password=password,
+            )
+        except HTTPError:
+            # The _find result still proves existence and enabled state.
+            detailed = candidate
+
+        return {
+            "found": True,
+            "ambiguous": False,
+            "rule": detailed,
+            "summary": f"Found detection rule '{rule_name}'.",
+        }
+
+    @staticmethod
+    def classify_rule_execution(
+        rule: dict[str, Any] | None,
+        correlated_alert_found: bool = False,
+    ) -> dict[str, Any]:
+        """Interpret Elastic's latest rule execution evidence conservatively."""
+
+        if correlated_alert_found:
+            summary = (
+                "A correlated Elastic Security alert proves the rule executed "
+                "successfully for this test run."
+            )
+
+            last_execution = (
+                (rule or {})
+                .get("execution_summary", {})
+                .get("last_execution", {})
+            )
+            status = last_execution.get("status")
+            if status:
+                summary += f" Latest reported execution status: {status}."
+
+            return {
+                "status": "PASS",
+                "summary": summary,
+                "message": last_execution.get("message"),
+            }
+
+        last_execution = (
+            (rule or {})
+            .get("execution_summary", {})
+            .get("last_execution", {})
+        )
+
+        if not isinstance(last_execution, dict) or not last_execution:
+            return {
+                "status": "UNKNOWN",
+                "summary": (
+                    "Elastic did not expose a latest execution summary. "
+                    "Rule execution health cannot be proven."
+                ),
+                "message": None,
+            }
+
+        raw_status = str(last_execution.get("status", "")).strip()
+        normalized = raw_status.casefold()
+        message = last_execution.get("message")
+
+        if normalized == "succeeded":
+            return {
+                "status": "PASS",
+                "summary": (
+                    "Elastic reports the latest rule execution as succeeded."
+                    + (f" {message}" if message else "")
+                ),
+                "message": message,
+            }
+
+        if "fail" in normalized or "error" in normalized:
+            return {
+                "status": "FAIL",
+                "summary": (
+                    f"Elastic reports rule execution status '{raw_status}'."
+                    + (f" {message}" if message else "")
+                ),
+                "message": message,
+            }
+
+        return {
+            "status": "UNKNOWN",
+            "summary": (
+                f"Elastic reports rule execution status '{raw_status or 'unknown'}'; "
+                "DetectTrace will not guess whether that represents success."
+                + (f" {message}" if message else "")
+            ),
+            "message": message,
+        }
+
     def find_alerts(
         self,
         rule_name: str,
@@ -473,15 +635,32 @@ class ElasticAdapter:
         stages.extend(trace.get("stages", []))
 
         if not trace.get("healthy", False):
-            stages.append(
-                {
-                    "name": "Elastic alert",
-                    "status": "BLOCKED",
-                    "summary": (
-                        "Blocked because the correlated telemetry failed an "
-                        "upstream DetectSpec checkpoint."
-                    ),
-                }
+            stages.extend(
+                [
+                    {
+                        "name": "Elastic rule exists",
+                        "status": "BLOCKED",
+                        "summary": "Blocked by an upstream DetectSpec failure.",
+                    },
+                    {
+                        "name": "Elastic rule enabled",
+                        "status": "BLOCKED",
+                        "summary": "Blocked by an upstream DetectSpec failure.",
+                    },
+                    {
+                        "name": "Rule execution",
+                        "status": "BLOCKED",
+                        "summary": "Blocked by an upstream DetectSpec failure.",
+                    },
+                    {
+                        "name": "Elastic alert",
+                        "status": "BLOCKED",
+                        "summary": (
+                            "Blocked because the correlated telemetry failed an "
+                            "upstream DetectSpec checkpoint."
+                        ),
+                    },
+                ]
             )
             return {
                 "healthy": False,
@@ -497,6 +676,143 @@ class ElasticAdapter:
                 "confidence": trace.get("confidence", "MEDIUM"),
                 "alert": None,
             }
+
+        try:
+            lookup = self.find_detection_rule(
+                rule_name=rule_name,
+                kibana_url=kibana_url,
+                username=kibana_username,
+                password=kibana_password,
+            )
+        except ValueError as exc:
+            lookup = {
+                "found": False,
+                "ambiguous": False,
+                "rule": None,
+                "summary": str(exc),
+            }
+        except HTTPError as exc:
+            lookup = {
+                "found": False,
+                "ambiguous": False,
+                "rule": None,
+                "summary": f"Elastic rule lookup failed: HTTP {exc.code}.",
+            }
+        except (URLError, TimeoutError, OSError) as exc:
+            lookup = {
+                "found": False,
+                "ambiguous": False,
+                "rule": None,
+                "summary": f"Elastic rule lookup failed: {exc}",
+            }
+
+        if not lookup.get("found"):
+            stages.extend(
+                [
+                    {
+                        "name": "Elastic rule exists",
+                        "status": "FAIL",
+                        "summary": lookup.get(
+                            "summary",
+                            f"Detection rule '{rule_name}' was not found.",
+                        ),
+                    },
+                    {
+                        "name": "Elastic rule enabled",
+                        "status": "BLOCKED",
+                        "summary": "Blocked because the detection rule was not found.",
+                    },
+                    {
+                        "name": "Rule execution",
+                        "status": "BLOCKED",
+                        "summary": "Blocked because the detection rule was not found.",
+                    },
+                    {
+                        "name": "Elastic alert",
+                        "status": "BLOCKED",
+                        "summary": "Blocked because the detection rule was not found.",
+                    },
+                ]
+            )
+            return {
+                "healthy": False,
+                "run_id": run_id,
+                "case": case,
+                "indexing_ms": injected["indexing_ms"],
+                "alert_latency_s": None,
+                "stages": stages,
+                "root_cause": lookup.get(
+                    "summary",
+                    f"Elastic detection rule '{rule_name}' was not found.",
+                ),
+                "confidence": "HIGH",
+                "alert": None,
+            }
+
+        rule = lookup.get("rule") or {}
+        stages.append(
+            {
+                "name": "Elastic rule exists",
+                "status": "PASS",
+                "summary": lookup.get("summary", f"Found rule '{rule_name}'."),
+            }
+        )
+
+        enabled = rule.get("enabled")
+        if enabled is not True:
+            stages.extend(
+                [
+                    {
+                        "name": "Elastic rule enabled",
+                        "status": "FAIL",
+                        "summary": (
+                            f"Detection rule '{rule_name}' is disabled."
+                            if enabled is False
+                            else (
+                                f"Could not prove that detection rule "
+                                f"'{rule_name}' is enabled."
+                            )
+                        ),
+                    },
+                    {
+                        "name": "Rule execution",
+                        "status": "BLOCKED",
+                        "summary": "Blocked because the detection rule is not enabled.",
+                    },
+                    {
+                        "name": "Elastic alert",
+                        "status": "BLOCKED",
+                        "summary": "Blocked because the detection rule is not enabled.",
+                    },
+                ]
+            )
+            return {
+                "healthy": False,
+                "run_id": run_id,
+                "case": case,
+                "indexing_ms": injected["indexing_ms"],
+                "alert_latency_s": None,
+                "stages": stages,
+                "root_cause": (
+                    f"Elastic detection rule '{rule_name}' is disabled. "
+                    "Enable the rule before running the detection test."
+                    if enabled is False
+                    else (
+                        f"DetectTrace could not prove that Elastic detection "
+                        f"rule '{rule_name}' is enabled."
+                    )
+                ),
+                "confidence": "HIGH" if enabled is False else "MEDIUM",
+                "alert": None,
+            }
+
+        stages.append(
+            {
+                "name": "Elastic rule enabled",
+                "status": "PASS",
+                "summary": f"Detection rule '{rule_name}' is enabled.",
+            }
+        )
 
         deadline = time.monotonic() + alert_timeout
         alert_result: dict[str, Any] | None = None
@@ -518,7 +834,75 @@ class ElasticAdapter:
 
             time.sleep(max(0.2, poll_interval))
 
+        # Re-read the rule after the run so execution evidence reflects the
+        # most recent state available from Elastic.
+        try:
+            refreshed = self.find_detection_rule(
+                rule_name=rule_name,
+                kibana_url=kibana_url,
+                username=kibana_username,
+                password=kibana_password,
+            )
+            if refreshed.get("found"):
+                rule = refreshed.get("rule") or rule
+        except Exception:
+            # The original existence/enabled evidence remains valid. If the
+            # refresh fails, classify execution conservatively below.
+            pass
+
+        execution = self.classify_rule_execution(
+            rule=rule,
+            correlated_alert_found=bool(
+                alert_result and alert_result.get("healthy")
+            ),
+        )
+
         if not alert_result or not alert_result.get("healthy"):
+            if execution["status"] == "FAIL":
+                stages.extend(
+                    [
+                        {
+                            "name": "Rule execution",
+                            "status": "FAIL",
+                            "summary": execution["summary"],
+                        },
+                        {
+                            "name": "Elastic alert",
+                            "status": "BLOCKED",
+                            "summary": (
+                                "Blocked because Elastic reported a rule "
+                                "execution failure."
+                            ),
+                        },
+                    ]
+                )
+                return {
+                    "healthy": False,
+                    "run_id": run_id,
+                    "case": case,
+                    "indexing_ms": injected["indexing_ms"],
+                    "alert_latency_s": None,
+                    "stages": stages,
+                    "root_cause": (
+                        "Elastic reports that the detection rule failed during "
+                        "execution. "
+                        + (
+                            f"Execution message: {execution['message']}"
+                            if execution.get("message")
+                            else "Review the rule execution details in Kibana."
+                        )
+                    ),
+                    "confidence": "HIGH",
+                    "alert": None,
+                }
+
+            stages.append(
+                {
+                    "name": "Rule execution",
+                    "status": execution["status"],
+                    "summary": execution["summary"],
+                }
+            )
             stages.append(
                 {
                     "name": "Elastic alert",
@@ -537,9 +921,9 @@ class ElasticAdapter:
                 "alert_latency_s": None,
                 "stages": stages,
                 "root_cause": (
-                    "Telemetry and DetectSpec rule checks passed, but Elastic "
-                    "Security did not produce an alert correlated to this "
-                    "specific test run within the allowed window."
+                    "Telemetry and DetectSpec rule checks passed and the "
+                    "Elastic rule is enabled, but no alert correlated to this "
+                    "specific test run was observed within the allowed window."
                 ),
                 "confidence": "HIGH",
                 "alert": None,
@@ -559,6 +943,13 @@ class ElasticAdapter:
             except ValueError:
                 latency = None
 
+        stages.append(
+            {
+                "name": "Rule execution",
+                "status": execution["status"],
+                "summary": execution["summary"],
+            }
+        )
         stages.append(
             {
                 "name": "Elastic alert",
@@ -583,8 +974,9 @@ class ElasticAdapter:
             "stages": stages,
             "root_cause": (
                 "Detection passed end-to-end with exact test-run correlation: "
-                "the injected telemetry, DetectSpec evaluation, and Elastic "
-                "Security alert all belong to the same run_id."
+                "the injected telemetry, DetectSpec evaluation, Elastic rule "
+                "state, and Elastic Security alert all belong to the expected "
+                "detection path."
             ),
             "confidence": "HIGH",
             "alert": alert,
